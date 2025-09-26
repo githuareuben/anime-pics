@@ -9,58 +9,59 @@ import {
   Image,
   PermissionsAndroid,
   Platform,
-  ActivityIndicator,
   ScrollView,
+  TextInput,
+  ActivityIndicator,
 } from 'react-native';
 import { launchCamera, launchImageLibrary, MediaType } from 'react-native-image-picker';
-import { InferenceSession, Tensor } from 'onnxruntime-react-native';
-import RNFS from 'react-native-fs';
-import { CameraRoll } from '@react-native-camera-roll/camera-roll';
+import TextRecognition from '@react-native-ml-kit/text-recognition';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export default function App() {
-  const [modelStatus, setModelStatus] = useState('Loading AI model...');
-  const [session, setSession] = useState(null);
-  const [originalPhoto, setOriginalPhoto] = useState(null);
-  const [processedPhoto, setProcessedPhoto] = useState(null);
+  const [receiptPhoto, setReceiptPhoto] = useState(null);
+  const [extractedText, setExtractedText] = useState('');
+  const [detectedAmounts, setDetectedAmounts] = useState([]);
+  const [selectedAmount, setSelectedAmount] = useState('');
+  const [merchant, setMerchant] = useState('');
+  const [expenses, setExpenses] = useState([]);
+  const [totalSpent, setTotalSpent] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
 
-  // Load ONNX model on app start
+  // Load saved expenses when app starts
   useEffect(() => {
-    const loadModel = async () => {
-      try {
-        setModelStatus('Loading AI model...');
-        
-        const fileName = 'mosaic-9.onnx';
-        const destPath = `${RNFS.DocumentDirectoryPath}/${fileName}`;
-        
-        // Check if model already exists in documents
-        const fileExists = await RNFS.exists(destPath);
-        if (!fileExists) {
-          setModelStatus('Copying model from assets...');
-          await RNFS.copyFileAssets(`models/${fileName}`, destPath);
-        }
-        
-        setModelStatus('Initializing AI model...');
-        const modelSession = await InferenceSession.create(destPath);
-        setSession(modelSession);
-        setModelStatus(`AI Model Ready (${modelSession.inputNames.join(', ')})`);
-        console.log('ONNX model loaded successfully');
-        
-      } catch (error) {
-        setModelStatus('AI Model Failed to Load');
-        console.error('Model loading error:', error);
-        Alert.alert(
-          'Model Error',
-          `Failed to load AI model: ${error.message}`,
-          [{ text: 'OK' }]
-        );
-      }
-    };
-
-    loadModel();
+    loadExpenses();
   }, []);
 
-  // Request camera and storage permissions
+  // Load expenses from storage
+  const loadExpenses = async () => {
+    try {
+      const savedExpenses = await AsyncStorage.getItem('expenses');
+      if (savedExpenses) {
+        const expenseList = JSON.parse(savedExpenses);
+        setExpenses(expenseList);
+        calculateTotal(expenseList);
+      }
+    } catch (error) {
+      console.error('Error loading expenses:', error);
+    }
+  };
+
+  // Save expenses to storage
+  const saveExpenses = async (expenseList) => {
+    try {
+      await AsyncStorage.setItem('expenses', JSON.stringify(expenseList));
+    } catch (error) {
+      console.error('Error saving expenses:', error);
+    }
+  };
+
+  // Calculate total spending
+  const calculateTotal = (expenseList) => {
+    const total = expenseList.reduce((sum, expense) => sum + parseFloat(expense.amount || 0), 0);
+    setTotalSpent(total);
+  };
+
+  // Request permissions
   const requestPermissions = async () => {
     if (Platform.OS === 'android') {
       try {
@@ -72,12 +73,9 @@ export default function App() {
         ]);
         
         const cameraGranted = granted[PermissionsAndroid.PERMISSIONS.CAMERA] === 'granted';
-        const storageGranted = 
-          granted[PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE] === 'granted' ||
-          granted[PermissionsAndroid.PERMISSIONS.READ_MEDIA_IMAGES] === 'granted';
         
         if (!cameraGranted) {
-          Alert.alert('Permission Required', 'Camera access is needed to take photos');
+          Alert.alert('Permission Required', 'Camera access is needed to scan receipts');
           return false;
         }
         
@@ -87,208 +85,223 @@ export default function App() {
         return false;
       }
     }
-    return true; // iOS handles permissions automatically
+    return true;
   };
 
-  // Preprocess image for ONNX model
-  const preprocessImage = async (imagePath) => {
+  // Extract text from image using ML Kit
+  const extractTextFromImage = async (imageUri) => {
     try {
-      // Note: This is a simplified preprocessing function
-      // In a production app, you would need to:
-      // 1. Load and decode the actual image
-      // 2. Resize to model's expected input size (typically 256x256 or 512x512)
-      // 3. Normalize pixel values to range expected by model (usually -1 to 1 or 0 to 1)
-      // 4. Convert from RGB to the channel order expected by model
-      // 5. Convert to Float32Array in the correct shape
-      
-      console.log('Preprocessing image:', imagePath);
-      
-      // For demo purposes, creating dummy tensor data
-      // Replace this with actual image processing logic
-      const inputSize = 224; // Fixed: Your model expects 224x224 input
-      const channels = 3;
-      const batchSize = 1;
-      
-      // Create random normalized data as placeholder
-      const imageData = new Float32Array(batchSize * channels * inputSize * inputSize);
-      for (let i = 0; i < imageData.length; i++) {
-        imageData[i] = (Math.random() - 0.5) * 2; // Random values between -1 and 1
-      }
-      
-      // Create tensor with correct shape [batch, channels, height, width]
-      const inputTensor = new Tensor('float32', imageData, [batchSize, channels, inputSize, inputSize]);
-      
-      return inputTensor;
-    } catch (error) {
-      console.error('Preprocessing error:', error);
-      throw new Error(`Image preprocessing failed: ${error.message}`);
-    }
-  };
-
-  // Process image with ONNX model
-  const processImageWithAI = async (imagePath) => {
-    if (!session) {
-      throw new Error('AI model not loaded');
-    }
-
-    try {
-      console.log('Starting AI processing...');
       setIsProcessing(true);
+      console.log('Starting OCR processing for:', imageUri);
       
-      // Preprocess image
-      const inputTensor = await preprocessImage(imagePath);
+      // Use ML Kit text recognition
+      const result = await TextRecognition.recognize(imageUri);
       
-      // Run inference
-      // Note: Input name depends on your specific model
-      // Check your model's input names with session.inputNames
-      const inputName = session.inputNames[0] || 'input';
-      const feeds = { [inputName]: inputTensor };
+      console.log('OCR completed. Found text blocks:', result.blocks.length);
       
-      console.log(`Running inference with input: ${inputName}`);
-      const results = await session.run(feeds);
+      // Combine all text blocks
+      const fullText = result.blocks.map(block => block.text).join('\n');
+      setExtractedText(fullText);
       
-      // Get output tensor
-      const outputName = session.outputNames[0] || Object.keys(results)[0];
-      const outputTensor = results[outputName];
+      // Extract potential amounts from the text
+      const amounts = extractAmountsFromText(fullText);
+      setDetectedAmounts(amounts);
       
-      if (!outputTensor) {
-        throw new Error('No output received from model');
+      // Auto-select the highest amount as likely total
+      if (amounts.length > 0) {
+        const likelyTotal = Math.max(...amounts);
+        setSelectedAmount(likelyTotal.toString());
       }
       
-      console.log(`Output tensor shape: ${outputTensor.dims}`);
-      console.log('AI processing completed');
+      // Try to extract merchant name from first few lines
+      const lines = fullText.split('\n').filter(line => line.trim().length > 2);
+      if (lines.length > 0) {
+        const merchantName = lines[0].trim();
+        // Clean up common receipt artifacts
+        const cleanMerchant = merchantName
+          .replace(/[^\w\s&-]/g, '') // Remove special chars except &, -, spaces
+          .replace(/\s+/g, ' ') // Normalize spaces
+          .trim();
+        
+        if (cleanMerchant.length > 0) {
+          setMerchant(cleanMerchant);
+        }
+      }
       
-      // Note: In a complete implementation, you would:
-      // 1. Post-process the output tensor back to image format
-      // 2. Convert from CHW to HWC format if needed
-      // 3. Denormalize pixel values
-      // 4. Save as new image file
-      // 5. Return the processed image path
-      
-      // For now, return original path as placeholder
-      return imagePath;
+      console.log('Extracted amounts:', amounts);
+      console.log('Full text extracted:', fullText.substring(0, 200) + '...');
       
     } catch (error) {
-      console.error('AI processing error:', error);
-      throw new Error(`AI processing failed: ${error.message}`);
+      console.error('OCR error:', error);
+      Alert.alert('OCR Error', `Failed to extract text: ${error.message}`);
+      setExtractedText('Failed to extract text from image');
     } finally {
       setIsProcessing(false);
     }
   };
 
-  // Take photo with camera
-  const takePhoto = async () => {
+  // Extract dollar amounts from text using comprehensive regex patterns
+  const extractAmountsFromText = (text) => {
+    const amounts = new Set(); // Use Set to avoid duplicates
+    
+    // Multiple regex patterns to catch different formats
+    const patterns = [
+      // $12.34, $1,234.56
+      /\$(\d{1,3}(?:,\d{3})*\.\d{2})/g,
+      // $12, $1,234 (whole dollars)
+      /\$(\d{1,3}(?:,\d{3})*)(?!\.\d)/g,
+      // 12.34, 123.45 (without $ symbol, with cents)
+      /(?:^|\s)(\d{1,4}\.\d{2})(?:\s|$)/gm,
+      // Amounts after "TOTAL", "SUBTOTAL", etc
+      /(?:total|subtotal|amount|due)[\s:]*\$?(\d{1,4}(?:,\d{3})*\.?\d{0,2})/gi,
+    ];
+    
+    patterns.forEach(pattern => {
+      let match;
+      while ((match = pattern.exec(text)) !== null) {
+        let amount = match[1].replace(/,/g, ''); // Remove commas
+        const numAmount = parseFloat(amount);
+        
+        // Filter reasonable amounts (between $0.01 and $9999.99)
+        if (!isNaN(numAmount) && numAmount > 0 && numAmount < 10000) {
+          amounts.add(numAmount);
+        }
+      }
+    });
+    
+    // Convert Set back to Array and sort descending (largest first)
+    return Array.from(amounts).sort((a, b) => b - a);
+  };
+
+  // Take photo of receipt
+  const takeReceiptPhoto = async () => {
     const hasPermission = await requestPermissions();
     if (!hasPermission) return;
 
     const options = {
       mediaType: 'photo' as MediaType,
-      quality: 0.9,
-      maxWidth: 1024,
-      maxHeight: 1024,
+      quality: 1.0, // High quality for better OCR
+      maxWidth: 2048,
+      maxHeight: 2048,
       includeBase64: false,
     };
 
-    launchCamera(options, async (response) => {
+    launchCamera(options, (response) => {
       if (response.assets && response.assets[0]) {
         const asset = response.assets[0];
-        setOriginalPhoto(asset.uri);
-        setProcessedPhoto(null); // Clear previous processed photo
+        setReceiptPhoto(asset.uri);
+        clearResults();
         
-        // Auto-process with AI if model is ready
-        if (session) {
-          try {
-            const processedPath = await processImageWithAI(asset.uri);
-            setProcessedPhoto(processedPath);
-            Alert.alert('Success!', 'Photo processed with AI anime style');
-          } catch (error) {
-            Alert.alert('Processing Error', error.message);
-            console.error('Auto-processing failed:', error);
-          }
-        }
+        // Run OCR on the captured image
+        extractTextFromImage(asset.uri);
       } else if (response.errorMessage) {
         Alert.alert('Camera Error', response.errorMessage);
       }
     });
   };
 
-  // Select photo from gallery
+  // Select receipt from gallery
   const selectFromGallery = async () => {
     const hasPermission = await requestPermissions();
     if (!hasPermission) return;
 
     const options = {
       mediaType: 'photo' as MediaType,
-      quality: 0.9,
-      maxWidth: 1024,
-      maxHeight: 1024,
+      quality: 1.0,
+      maxWidth: 2048,
+      maxHeight: 2048,
       includeBase64: false,
     };
 
-    launchImageLibrary(options, async (response) => {
+    launchImageLibrary(options, (response) => {
       if (response.assets && response.assets[0]) {
         const asset = response.assets[0];
-        setOriginalPhoto(asset.uri);
-        setProcessedPhoto(null);
+        setReceiptPhoto(asset.uri);
+        clearResults();
         
-        if (session) {
-          try {
-            const processedPath = await processImageWithAI(asset.uri);
-            setProcessedPhoto(processedPath);
-            Alert.alert('Success!', 'Photo processed with AI anime style');
-          } catch (error) {
-            Alert.alert('Processing Error', error.message);
-            console.error('Auto-processing failed:', error);
-          }
-        }
+        // Run OCR on the selected image
+        extractTextFromImage(asset.uri);
       } else if (response.errorMessage) {
         Alert.alert('Gallery Error', response.errorMessage);
       }
     });
   };
 
-  // Manually process current photo
-  const processCurrentPhoto = async () => {
-    if (!originalPhoto) {
-      Alert.alert('No Photo', 'Please take or select a photo first');
-      return;
-    }
-
-    if (!session) {
-      Alert.alert('Model Not Ready', 'AI model is still loading');
-      return;
-    }
-
-    try {
-      const processedPath = await processImageWithAI(originalPhoto);
-      setProcessedPhoto(processedPath);
-      Alert.alert('Success!', 'Photo processed with anime style');
-    } catch (error) {
-      Alert.alert('Processing Error', error.message);
-      console.error('Manual processing failed:', error);
-    }
+  // Clear OCR results
+  const clearResults = () => {
+    setExtractedText('');
+    setDetectedAmounts([]);
+    setSelectedAmount('');
+    setMerchant('');
   };
 
-  // Save processed photo to gallery
-  const saveToGallery = async () => {
-    if (!processedPhoto) {
-      Alert.alert('No Processed Photo', 'Please process a photo first');
+  // Add expense to budget with confirmation
+  const addExpense = async () => {
+    const amount = parseFloat(selectedAmount);
+    
+    if (!selectedAmount || isNaN(amount) || amount <= 0) {
+      Alert.alert('Invalid Amount', 'Please enter a valid dollar amount');
       return;
     }
 
-    try {
-      await CameraRoll.save(processedPhoto, { type: 'photo' });
-      Alert.alert('Saved!', 'Anime-style photo saved to gallery');
-    } catch (error) {
-      console.error('Save error:', error);
-      Alert.alert('Save Error', `Failed to save: ${error.message}`);
-    }
+    const merchantName = merchant || 'Unknown Merchant';
+    
+    // Show confirmation dialog
+    Alert.alert(
+      'Add Expense',
+      `Add $${amount.toFixed(2)} expense from ${merchantName}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { 
+          text: 'Add', 
+          onPress: async () => {
+            const newExpense = {
+              id: Date.now().toString(),
+              amount: amount,
+              merchant: merchantName,
+              date: new Date().toLocaleDateString(),
+              photo: receiptPhoto,
+              extractedText: extractedText,
+            };
+
+            const updatedExpenses = [...expenses, newExpense];
+            setExpenses(updatedExpenses);
+            calculateTotal(updatedExpenses);
+            await saveExpenses(updatedExpenses);
+
+            Alert.alert('Success', `$${amount.toFixed(2)} expense added to your budget`);
+            
+            // Clear form
+            clearForm();
+          }
+        },
+      ]
+    );
   };
 
-  // Clear all photos
-  const clearPhotos = () => {
-    setOriginalPhoto(null);
-    setProcessedPhoto(null);
+  // Clear the form
+  const clearForm = () => {
+    setReceiptPhoto(null);
+    setExtractedText('');
+    setDetectedAmounts([]);
+    setSelectedAmount('');
+    setMerchant('');
+  };
+
+  // Delete expense
+  const deleteExpense = async (expenseId) => {
+    const updatedExpenses = expenses.filter(expense => expense.id !== expenseId);
+    setExpenses(updatedExpenses);
+    calculateTotal(updatedExpenses);
+    await saveExpenses(updatedExpenses);
+  };
+
+  // Retry OCR processing
+  const retryOCR = () => {
+    if (receiptPhoto) {
+      clearResults();
+      extractTextFromImage(receiptPhoto);
+    }
   };
 
   return (
@@ -296,105 +309,164 @@ export default function App() {
       <ScrollView contentContainerStyle={styles.scrollContainer}>
         {/* Header */}
         <View style={styles.header}>
-          <Text style={styles.title}>AniSnap</Text>
-          <Text style={styles.subtitle}>AI Anime Photo Converter</Text>
-          <Text style={[
-            styles.status,
-            modelStatus.includes('Ready') && styles.statusReady,
-            modelStatus.includes('Failed') && styles.statusError
-          ]}>
-            {modelStatus}
-          </Text>
+          <Text style={styles.title}>Smart Receipt Scanner</Text>
+          <Text style={styles.subtitle}>OCR-Powered Budget Tracker</Text>
+          <View style={styles.totalContainer}>
+            <Text style={styles.totalLabel}>Total Spent:</Text>
+            <Text style={styles.totalAmount}>${totalSpent.toFixed(2)}</Text>
+          </View>
         </View>
 
-        {/* Photo Display */}
-        <View style={styles.photoContainer}>
-          {originalPhoto && (
-            <View style={styles.photoSection}>
-              <Text style={styles.photoLabel}>Original</Text>
-              <Image source={{ uri: originalPhoto }} style={styles.photo} />
-            </View>
-          )}
+        {/* Camera Section */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Scan Receipt</Text>
           
-          {processedPhoto && (
-            <View style={styles.photoSection}>
-              <Text style={styles.photoLabel}>Anime Style</Text>
-              <Image source={{ uri: processedPhoto }} style={styles.photo} />
-            </View>
-          )}
-          
-          {!originalPhoto && !processedPhoto && (
-            <View style={styles.placeholderContainer}>
-              <Text style={styles.placeholderText}>
-                No photos yet. Take or select a photo to get started!
+          <View style={styles.buttonRow}>
+            <TouchableOpacity 
+              style={[styles.cameraButton, isProcessing && styles.buttonDisabled]} 
+              onPress={takeReceiptPhoto}
+              disabled={isProcessing}
+            >
+              <Text style={styles.buttonText}>Take Photo</Text>
+            </TouchableOpacity>
+            
+            <TouchableOpacity 
+              style={[styles.galleryButton, isProcessing && styles.buttonDisabled]} 
+              onPress={selectFromGallery}
+              disabled={isProcessing}
+            >
+              <Text style={[styles.buttonText, styles.galleryButtonText]}>
+                From Gallery
               </Text>
+            </TouchableOpacity>
+          </View>
+
+          {receiptPhoto && (
+            <View style={styles.photoContainer}>
+              <Image source={{ uri: receiptPhoto }} style={styles.receiptImage} />
+              {!isProcessing && extractedText && (
+                <TouchableOpacity style={styles.retryButton} onPress={retryOCR}>
+                  <Text style={styles.retryButtonText}>Retry OCR</Text>
+                </TouchableOpacity>
+              )}
             </View>
           )}
         </View>
 
-        {/* Action Buttons */}
-        <View style={styles.buttonContainer}>
-          <TouchableOpacity
-            style={[styles.button, styles.primaryButton]}
-            onPress={takePhoto}
-            disabled={isProcessing}
-          >
-            <Text style={styles.buttonText}>Take Photo</Text>
-          </TouchableOpacity>
+        {/* OCR Processing Status */}
+        {isProcessing && (
+          <View style={styles.section}>
+            <View style={styles.processingContainer}>
+              <ActivityIndicator size="large" color="#3b82f6" />
+              <Text style={styles.processingText}>Extracting text from receipt...</Text>
+            </View>
+          </View>
+        )}
 
-          <TouchableOpacity
-            style={[styles.button, styles.secondaryButton]}
-            onPress={selectFromGallery}
-            disabled={isProcessing}
-          >
-            <Text style={[styles.buttonText, styles.secondaryButtonText]}>
-              Choose from Gallery
-            </Text>
-          </TouchableOpacity>
+        {/* Detected Amounts */}
+        {detectedAmounts.length > 0 && !isProcessing && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Detected Amounts</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              <View style={styles.amountsContainer}>
+                {detectedAmounts.map((amount, index) => (
+                  <TouchableOpacity
+                    key={index}
+                    style={[
+                      styles.amountChip,
+                      selectedAmount === amount.toString() && styles.selectedAmountChip
+                    ]}
+                    onPress={() => setSelectedAmount(amount.toString())}
+                  >
+                    <Text style={[
+                      styles.amountChipText,
+                      selectedAmount === amount.toString() && styles.selectedAmountChipText
+                    ]}>
+                      ${amount.toFixed(2)}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </ScrollView>
+          </View>
+        )}
 
-          {originalPhoto && (
+        {/* Manual Entry Section */}
+        {receiptPhoto && !isProcessing && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Confirm Details</Text>
+            
+            <View style={styles.inputContainer}>
+              <Text style={styles.inputLabel}>Amount ($)</Text>
+              <TextInput
+                style={styles.textInput}
+                value={selectedAmount}
+                onChangeText={setSelectedAmount}
+                placeholder="0.00"
+                keyboardType="numeric"
+                placeholderTextColor="#999"
+              />
+            </View>
+
+            <View style={styles.inputContainer}>
+              <Text style={styles.inputLabel}>Merchant</Text>
+              <TextInput
+                style={styles.textInput}
+                value={merchant}
+                onChangeText={setMerchant}
+                placeholder="Store name"
+                placeholderTextColor="#999"
+              />
+            </View>
+
             <TouchableOpacity
               style={[
-                styles.button,
-                styles.processButton,
-                (!session || isProcessing) && styles.buttonDisabled
+                styles.addButton,
+                (!selectedAmount || isNaN(parseFloat(selectedAmount))) && styles.buttonDisabled
               ]}
-              onPress={processCurrentPhoto}
-              disabled={!session || isProcessing}
+              onPress={addExpense}
+              disabled={!selectedAmount || isNaN(parseFloat(selectedAmount))}
             >
-              {isProcessing ? (
-                <View style={styles.processingContainer}>
-                  <ActivityIndicator size="small" color="white" />
-                  <Text style={[styles.buttonText, { marginLeft: 8 }]}>
-                    Processing...
-                  </Text>
+              <Text style={styles.buttonText}>Add to Budget</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.clearButton} onPress={clearForm}>
+              <Text style={styles.clearButtonText}>Clear</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Extracted Text (Collapsible) */}
+        {extractedText && !isProcessing && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Extracted Text</Text>
+            <ScrollView style={styles.textContainer} nestedScrollEnabled>
+              <Text style={styles.extractedText}>{extractedText}</Text>
+            </ScrollView>
+          </View>
+        )}
+
+        {/* Recent Expenses */}
+        {expenses.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Recent Expenses</Text>
+            {expenses.slice().reverse().slice(0, 5).map((expense) => (
+              <View key={expense.id} style={styles.expenseItem}>
+                <View style={styles.expenseInfo}>
+                  <Text style={styles.expenseAmount}>${expense.amount.toFixed(2)}</Text>
+                  <Text style={styles.expenseMerchant}>{expense.merchant}</Text>
+                  <Text style={styles.expenseDate}>{expense.date}</Text>
                 </View>
-              ) : (
-                <Text style={styles.buttonText}>Apply Anime Style</Text>
-              )}
-            </TouchableOpacity>
-          )}
-
-          {processedPhoto && (
-            <TouchableOpacity
-              style={[styles.button, styles.saveButton]}
-              onPress={saveToGallery}
-            >
-              <Text style={styles.buttonText}>Save to Gallery</Text>
-            </TouchableOpacity>
-          )}
-
-          {(originalPhoto || processedPhoto) && (
-            <TouchableOpacity
-              style={[styles.button, styles.clearButton]}
-              onPress={clearPhotos}
-            >
-              <Text style={[styles.buttonText, styles.clearButtonText]}>
-                Clear Photos
-              </Text>
-            </TouchableOpacity>
-          )}
-        </View>
+                <TouchableOpacity
+                  style={styles.deleteButton}
+                  onPress={() => deleteExpense(expense.id)}
+                >
+                  <Text style={styles.deleteButtonText}>Delete</Text>
+                </TouchableOpacity>
+              </View>
+            ))}
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -403,7 +475,7 @@ export default function App() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#f8fafc',
   },
   scrollContainer: {
     flexGrow: 1,
@@ -413,7 +485,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 20,
     backgroundColor: 'white',
-    marginBottom: 20,
+    marginBottom: 15,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
@@ -421,120 +493,224 @@ const styles = StyleSheet.create({
     elevation: 3,
   },
   title: {
-    fontSize: 32,
+    fontSize: 26,
     fontWeight: '800',
-    color: '#2563eb',
+    color: '#1e293b',
     marginBottom: 4,
   },
   subtitle: {
+    fontSize: 14,
+    color: '#64748b',
+    marginBottom: 15,
+  },
+  totalContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f1f5f9',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 8,
+  },
+  totalLabel: {
     fontSize: 16,
-    color: '#6b7280',
-    marginBottom: 8,
+    color: '#475569',
+    marginRight: 10,
   },
-  status: {
-    fontSize: 12,
-    color: '#9ca3af',
-    textAlign: 'center',
-  },
-  statusReady: {
+  totalAmount: {
+    fontSize: 20,
+    fontWeight: '700',
     color: '#059669',
-    fontWeight: '600',
   },
-  statusError: {
-    color: '#dc2626',
-    fontWeight: '600',
-  },
-  photoContainer: {
-    marginHorizontal: 20,
-    marginBottom: 20,
-    minHeight: 200,
-  },
-  photoSection: {
-    marginBottom: 20,
-    alignItems: 'center',
-  },
-  photoLabel: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#374151',
-    marginBottom: 8,
-  },
-  photo: {
-    width: '100%',
-    height: 250,
+  section: {
+    marginHorizontal: 15,
+    marginBottom: 15,
+    backgroundColor: 'white',
     borderRadius: 12,
-    backgroundColor: '#e5e7eb',
+    padding: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.05,
+    shadowRadius: 2,
+    elevation: 1,
   },
-  placeholderContainer: {
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#1e293b',
+    marginBottom: 15,
+  },
+  buttonRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginBottom: 15,
+  },
+  cameraButton: {
     flex: 1,
+    backgroundColor: '#3b82f6',
+    paddingVertical: 12,
+    borderRadius: 8,
     alignItems: 'center',
-    justifyContent: 'center',
-    padding: 40,
+  },
+  galleryButton: {
+    flex: 1,
     backgroundColor: 'white',
-    borderRadius: 12,
-    borderWidth: 2,
-    borderColor: '#e5e7eb',
-    borderStyle: 'dashed',
-  },
-  placeholderText: {
-    fontSize: 16,
-    color: '#9ca3af',
-    textAlign: 'center',
-    lineHeight: 24,
-  },
-  buttonContainer: {
-    paddingHorizontal: 20,
-    gap: 12,
-  },
-  button: {
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    borderRadius: 10,
+    paddingVertical: 12,
+    borderRadius: 8,
     alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 48,
-  },
-  primaryButton: {
-    backgroundColor: '#2563eb',
-    shadowColor: '#2563eb',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 4,
-  },
-  secondaryButton: {
-    backgroundColor: 'white',
     borderWidth: 2,
-    borderColor: '#2563eb',
-  },
-  processButton: {
-    backgroundColor: '#7c3aed',
-  },
-  saveButton: {
-    backgroundColor: '#059669',
-  },
-  clearButton: {
-    backgroundColor: 'white',
-    borderWidth: 1,
-    borderColor: '#d1d5db',
-  },
-  buttonDisabled: {
-    backgroundColor: '#9ca3af',
-    opacity: 0.6,
+    borderColor: '#3b82f6',
   },
   buttonText: {
     fontSize: 16,
     fontWeight: '600',
     color: 'white',
   },
-  secondaryButtonText: {
-    color: '#2563eb',
+  galleryButtonText: {
+    color: '#3b82f6',
   },
-  clearButtonText: {
-    color: '#6b7280',
+  buttonDisabled: {
+    opacity: 0.5,
+  },
+  photoContainer: {
+    alignItems: 'center',
+  },
+  receiptImage: {
+    width: '100%',
+    height: 200,
+    borderRadius: 8,
+    backgroundColor: '#e2e8f0',
+  },
+  retryButton: {
+    marginTop: 10,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    backgroundColor: '#f59e0b',
+    borderRadius: 6,
+  },
+  retryButtonText: {
+    color: 'white',
+    fontSize: 12,
+    fontWeight: '600',
   },
   processingContainer: {
-    flexDirection: 'row',
     alignItems: 'center',
+    paddingVertical: 20,
+  },
+  processingText: {
+    marginTop: 10,
+    fontSize: 16,
+    color: '#64748b',
+  },
+  amountsContainer: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  amountChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    backgroundColor: '#f1f5f9',
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#e2e8f0',
+  },
+  selectedAmountChip: {
+    backgroundColor: '#3b82f6',
+    borderColor: '#3b82f6',
+  },
+  amountChipText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#475569',
+  },
+  selectedAmountChipText: {
+    color: 'white',
+  },
+  inputContainer: {
+    marginBottom: 15,
+  },
+  inputLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#374151',
+    marginBottom: 5,
+  },
+  textInput: {
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    fontSize: 16,
+    backgroundColor: 'white',
+    color: '#1f2937',
+  },
+  addButton: {
+    backgroundColor: '#059669',
+    paddingVertical: 14,
+    borderRadius: 8,
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  clearButton: {
+    backgroundColor: 'white',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+  },
+  clearButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#6b7280',
+  },
+  textContainer: {
+    maxHeight: 120,
+    backgroundColor: '#f8fafc',
+    borderRadius: 8,
+    padding: 12,
+  },
+  extractedText: {
+    fontSize: 11,
+    color: '#475569',
+    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+    lineHeight: 14,
+  },
+  expenseItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  expenseInfo: {
+    flex: 1,
+  },
+  expenseAmount: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1e293b',
+  },
+  expenseMerchant: {
+    fontSize: 14,
+    color: '#64748b',
+    marginTop: 2,
+  },
+  expenseDate: {
+    fontSize: 12,
+    color: '#94a3b8',
+    marginTop: 2,
+  },
+  deleteButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    backgroundColor: '#fef2f2',
+    borderRadius: 6,
+  },
+  deleteButtonText: {
+    fontSize: 12,
+    color: '#dc2626',
+    fontWeight: '600',
   },
 });
